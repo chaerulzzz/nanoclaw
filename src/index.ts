@@ -2,7 +2,9 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  AGENT_MODEL,
   ASSISTANT_NAME,
+  FAST_MODEL,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
   TIMEZONE,
@@ -52,6 +54,14 @@ import {
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import {
+  callDeepSeekChat,
+  callDeepSeekReasoning,
+  isRateLimitError,
+} from './utils/deepseek.js';
+import { readEnvFile } from './env.js';
+
+export { callDeepSeekChat, callDeepSeekReasoning };
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -136,6 +146,36 @@ export function _setRegisteredGroups(
   registeredGroups = groups;
 }
 
+const FAST_HINT_RE = /!fast\s*/i;
+const SMART_HINT_RE = /!smart\s*/i;
+
+/**
+ * Detect !fast / !smart model hint from the user's own messages.
+ * Strips the hint from the message content so the agent doesn't see it.
+ * Returns the resolved model and the (possibly modified) messages array.
+ */
+function resolveModel(messages: NewMessage[]): {
+  model: string;
+  messages: NewMessage[];
+} {
+  let model = AGENT_MODEL;
+  const processed = messages.map((msg) => {
+    if (!msg.is_from_me) return msg;
+    // Strip @Maxie trigger prefix to check the actual command
+    const bare = msg.content.replace(TRIGGER_PATTERN, '').trim();
+    if (FAST_HINT_RE.test(bare)) {
+      model = FAST_MODEL;
+      return { ...msg, content: msg.content.replace(FAST_HINT_RE, '').trim() };
+    }
+    if (SMART_HINT_RE.test(bare)) {
+      // !smart forces the default Sonnet model explicitly
+      return { ...msg, content: msg.content.replace(SMART_HINT_RE, '').trim() };
+    }
+    return msg;
+  });
+  return { model, messages: processed };
+}
+
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
@@ -172,7 +212,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  const { model, messages: processedMessages } = resolveModel(missedMessages);
+  const prompt = formatMessages(processedMessages, TIMEZONE);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -204,37 +245,46 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
-      if (text) {
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
+  const agentOutput = await runAgent(
+    group,
+    prompt,
+    chatJid,
+    model,
+    async (result) => {
+      // Streaming output callback — called for each agent result
+      if (result.result) {
+        const raw =
+          typeof result.result === 'string'
+            ? result.result
+            : JSON.stringify(result.result);
+        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+        logger.info(
+          { group: group.name },
+          `Agent output: ${raw.slice(0, 200)}`,
+        );
+        if (text) {
+          await channel.sendMessage(chatJid, text);
+          outputSentToUser = true;
+        }
+        // Only reset idle timer on actual results, not session-update markers (result: null)
+        resetIdleTimer();
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
+      if (result.status === 'success') {
+        queue.notifyIdle(chatJid);
+      }
 
-    if (result.status === 'error') {
-      hadError = true;
-    }
-  });
+      if (result.status === 'error') {
+        hadError = true;
+      }
+    },
+  );
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
-  if (output === 'error' || hadError) {
+  if (agentOutput.status === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
@@ -244,6 +294,61 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       );
       return true;
     }
+
+    // Fallback: if the error is a rate limit (429) or service unavailable (503),
+    // retry once with DeepSeek instead of rolling back.
+    const agentError = agentOutput.error || '';
+    if (isRateLimitError(agentError)) {
+      logger.warn(
+        { group: group.name, error: agentError },
+        'Rate limit / service error detected, falling back to DeepSeek',
+      );
+      const envSecrets = readEnvFile(['DEEPSEEK_API_KEY']);
+      const deepseekKey =
+        process.env.DEEPSEEK_API_KEY || envSecrets.DEEPSEEK_API_KEY;
+
+      if (deepseekKey) {
+        try {
+          await channel.setTyping?.(chatJid, true);
+          // Use reasoning model for complex (longer) prompts, chat otherwise
+          const isComplex = prompt.length > 500;
+          const deepseekResult = isComplex
+            ? await callDeepSeekReasoning(
+                [{ role: 'user', content: prompt }],
+                deepseekKey,
+              )
+            : await callDeepSeekChat(
+                [{ role: 'user', content: prompt }],
+                deepseekKey,
+              );
+          await channel.setTyping?.(chatJid, false);
+          const responseText = deepseekResult.content.trim();
+          if (responseText) {
+            await channel.sendMessage(chatJid, responseText);
+            logger.info(
+              {
+                group: group.name,
+                model: isComplex ? 'deepseek-reasoner' : 'deepseek-chat',
+              },
+              'DeepSeek fallback response sent',
+            );
+            return true;
+          }
+        } catch (deepseekErr) {
+          logger.error(
+            { group: group.name, err: deepseekErr },
+            'DeepSeek fallback also failed',
+          );
+          await channel.setTyping?.(chatJid, false);
+        }
+      } else {
+        logger.warn(
+          { group: group.name },
+          'Rate limit error but DEEPSEEK_API_KEY not configured, skipping fallback',
+        );
+      }
+    }
+
     // Roll back cursor so retries can re-process these messages
     lastAgentTimestamp[chatJid] = previousCursor;
     saveState();
@@ -261,8 +366,9 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
+  model: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
-): Promise<'success' | 'error'> {
+): Promise<{ status: 'success' | 'error'; error?: string }> {
   const isMain = group.isMain === true;
   const sessionId = sessions[group.folder];
 
@@ -312,6 +418,7 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        model,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -328,13 +435,14 @@ async function runAgent(
         { group: group.name, error: output.error },
         'Container agent error',
       );
-      return 'error';
+      return { status: 'error', error: output.error };
     }
 
-    return 'success';
+    return { status: 'success' };
   } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
     logger.error({ group: group.name, err }, 'Agent error');
-    return 'error';
+    return { status: 'error', error };
   }
 }
 
