@@ -6,13 +6,19 @@ import { readEnvFile } from './env.js';
 // Read config values from .env (falls back to process.env).
 // Secrets are NOT read here — they stay on disk and are loaded only
 // where needed (container-runner.ts) to avoid leaking to child processes.
-const envConfig = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER']);
+const envConfig = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER', 'AGENT_MODEL']);
 
 export const ASSISTANT_NAME =
   process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
 export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER ||
     envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
+// Default agent model. Override with AGENT_MODEL in .env.
+// Use !fast prefix in WhatsApp to force Haiku for a single message.
+export const AGENT_MODEL =
+  process.env.AGENT_MODEL || envConfig.AGENT_MODEL || 'claude-sonnet-4-6';
+export const FAST_MODEL = 'claude-haiku-4-5-20251001';
+
 export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
@@ -34,6 +40,7 @@ export const SENDER_ALLOWLIST_PATH = path.join(
   'sender-allowlist.json',
 );
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
+export const IMAGES_DIR = path.join(STORE_DIR, 'images');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 

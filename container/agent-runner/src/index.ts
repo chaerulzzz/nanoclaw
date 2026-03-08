@@ -28,6 +28,7 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   secrets?: Record<string, string>;
+  model?: string;
 }
 
 interface ContainerOutput {
@@ -446,6 +447,7 @@ async function runQuery(
             NANOCLAW_CHAT_JID: containerInput.chatJid,
             NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+            ...(sdkEnv.DEEPSEEK_API_KEY ? { DEEPSEEK_API_KEY: sdkEnv.DEEPSEEK_API_KEY } : {}),
           },
         },
       },
@@ -513,6 +515,9 @@ async function main(): Promise<void> {
   const sdkEnv: Record<string, string | undefined> = { ...process.env };
   for (const [key, value] of Object.entries(containerInput.secrets || {})) {
     sdkEnv[key] = value;
+  }
+  if (containerInput.model) {
+    sdkEnv['ANTHROPIC_MODEL'] = containerInput.model;
   }
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));

@@ -333,6 +333,110 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   },
 );
 
+// ── DeepSeek tools ──────────────────────────────────────────────────────────
+
+const deepseekApiKey = process.env.DEEPSEEK_API_KEY;
+
+interface DeepSeekApiResponse {
+  choices: Array<{
+    message: {
+      content: string;
+      reasoning_content?: string;
+    };
+  }>;
+}
+
+async function callDeepSeekApi(
+  model: string,
+  messages: Array<{ role: string; content: string }>,
+): Promise<{ content: string; reasoning?: string }> {
+  if (!deepseekApiKey) {
+    throw new Error('DEEPSEEK_API_KEY is not configured. Add it to your .env file.');
+  }
+
+  const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${deepseekApiKey}`,
+    },
+    body: JSON.stringify({ model, messages }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`DeepSeek API error: ${response.status} ${response.statusText}`);
+  }
+
+  const data = (await response.json()) as DeepSeekApiResponse;
+  const message = data.choices[0]?.message;
+  if (!message) throw new Error('DeepSeek returned no response');
+
+  return {
+    content: message.content,
+    reasoning: message.reasoning_content,
+  };
+}
+
+server.tool(
+  'call_deepseek_chat',
+  `Call DeepSeek Chat (deepseek-chat model) directly. Fast and cost-effective for general questions, summarization, translation, and everyday tasks. Use this when the user explicitly asks for DeepSeek, or when you want a second opinion on something without spending Claude quota.`,
+  {
+    prompt: z.string().describe('The message or question to send to DeepSeek'),
+    system: z.string().optional().describe('Optional system prompt to guide the response style or role'),
+  },
+  async (args) => {
+    try {
+      const messages: Array<{ role: string; content: string }> = [];
+      if (args.system) messages.push({ role: 'system', content: args.system });
+      messages.push({ role: 'user', content: args.prompt });
+
+      const result = await callDeepSeekApi('deepseek-chat', messages);
+
+      return {
+        content: [{ type: 'text' as const, text: result.content }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `DeepSeek error: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'call_deepseek_reasoning',
+  `Call DeepSeek Reasoner (deepseek-reasoner model) for complex multi-step reasoning tasks. Slower than deepseek-chat but produces high-quality answers for math, logic puzzles, code analysis, planning, and tasks that benefit from chain-of-thought thinking. Returns the full reasoning chain followed by the final answer.`,
+  {
+    prompt: z.string().describe('The complex question or task that requires careful reasoning'),
+    system: z.string().optional().describe('Optional system prompt'),
+  },
+  async (args) => {
+    try {
+      const messages: Array<{ role: string; content: string }> = [];
+      if (args.system) messages.push({ role: 'system', content: args.system });
+      messages.push({ role: 'user', content: args.prompt });
+
+      const result = await callDeepSeekApi('deepseek-reasoner', messages);
+
+      let output = '';
+      if (result.reasoning) {
+        output += `<reasoning>\n${result.reasoning}\n</reasoning>\n\n`;
+      }
+      output += result.content;
+
+      return {
+        content: [{ type: 'text' as const, text: output }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `DeepSeek error: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);
