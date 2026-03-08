@@ -53,6 +53,7 @@ import {
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import { parseImageReferences } from './image.js';
 import { logger } from './logger.js';
 import {
   callDeepSeekChat,
@@ -214,6 +215,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const { model, messages: processedMessages } = resolveModel(missedMessages);
   const prompt = formatMessages(processedMessages, TIMEZONE);
+  const imageAttachments = parseImageReferences(missedMessages);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -250,6 +252,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     prompt,
     chatJid,
     model,
+    imageAttachments,
     async (result) => {
       // Streaming output callback — called for each agent result
       if (result.result) {
@@ -367,6 +370,7 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   model: string,
+  imageAttachments: Array<{ relativePath: string; mediaType: string }>,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<{ status: 'success' | 'error'; error?: string }> {
   const isMain = group.isMain === true;
@@ -419,6 +423,7 @@ async function runAgent(
         isMain,
         assistantName: ASSISTANT_NAME,
         model,
+        ...(imageAttachments.length > 0 && { imageAttachments }),
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),

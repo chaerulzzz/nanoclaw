@@ -5,9 +5,8 @@ import path from 'path';
 import makeWASocket, {
   Browsers,
   DisconnectReason,
-  WAMessage,
-  WASocket,
   downloadMediaMessage,
+  WASocket,
   fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore,
   normalizeMessageContent,
@@ -17,10 +16,11 @@ import makeWASocket, {
 import {
   ASSISTANT_HAS_OWN_NUMBER,
   ASSISTANT_NAME,
-  IMAGES_DIR,
+  GROUPS_DIR,
   STORE_DIR,
 } from '../config.js';
 import { getLastGroupSync, setLastGroupSync, updateChatName } from '../db.js';
+import { isImageMessage, processImage } from '../image.js';
 import { logger } from '../logger.js';
 import {
   Channel,
@@ -113,15 +113,7 @@ export class WhatsAppChannel implements Channel {
         );
 
         if (shouldReconnect) {
-          logger.info('Reconnecting...');
-          this.connectInternal().catch((err) => {
-            logger.error({ err }, 'Failed to reconnect, retrying in 5s');
-            setTimeout(() => {
-              this.connectInternal().catch((err2) => {
-                logger.error({ err: err2 }, 'Reconnection retry failed');
-              });
-            }, 5000);
-          });
+          this.scheduleReconnect(1);
         } else {
           logger.info('Logged out. Run /setup to re-authenticate.');
           process.exit(0);
@@ -209,22 +201,23 @@ export class WhatsAppChannel implements Channel {
             let content =
               normalized.conversation ||
               normalized.extendedTextMessage?.text ||
+              normalized.imageMessage?.caption ||
+              normalized.videoMessage?.caption ||
               '';
 
-            if (!content && normalized.imageMessage) {
-              const caption = normalized.imageMessage.caption || '';
-              const savedPath = await this.downloadImage(
-                msg,
-                normalized.imageMessage.mimetype || undefined,
-              );
-              if (savedPath) {
-                const filename = path.basename(savedPath);
-                content = `[Image: /workspace/images/${filename}]${caption ? `\nCaption: ${caption}` : ''}`;
-              } else {
-                content = caption || '[Image - unavailable]';
+            // Image attachment handling
+            if (isImageMessage(msg)) {
+              try {
+                const buffer = await downloadMediaMessage(msg, 'buffer', {});
+                const groupDir = path.join(GROUPS_DIR, groups[chatJid].folder);
+                const caption = normalized?.imageMessage?.caption ?? '';
+                const result = await processImage(buffer as Buffer, groupDir, caption);
+                if (result) {
+                  content = result.content;
+                }
+              } catch (err) {
+                logger.warn({ err, jid: chatJid }, 'Image - download failed');
               }
-            } else if (!content) {
-              content = normalized.videoMessage?.caption || '';
             }
 
             // Skip protocol messages with no text content (encryption keys, read receipts, etc.)
@@ -301,42 +294,6 @@ export class WhatsAppChannel implements Channel {
     return jid.endsWith('@g.us') || jid.endsWith('@s.whatsapp.net');
   }
 
-  private mimetypeToExt(mimetype?: string): string {
-    switch (mimetype) {
-      case 'image/png':
-        return '.png';
-      case 'image/webp':
-        return '.webp';
-      case 'image/gif':
-        return '.gif';
-      default:
-        return '.jpg';
-    }
-  }
-
-  private async downloadImage(
-    msg: WAMessage,
-    mimetype?: string,
-  ): Promise<string | null> {
-    try {
-      const buffer = (await downloadMediaMessage(msg, 'buffer', {})) as Buffer;
-      const ext = this.mimetypeToExt(mimetype);
-      const msgId = (msg.key.id || Date.now().toString()).replace(
-        /[^a-zA-Z0-9-_]/g,
-        '_',
-      );
-      const filename = `${msgId}${ext}`;
-      const filepath = path.join(IMAGES_DIR, filename);
-      fs.mkdirSync(IMAGES_DIR, { recursive: true });
-      fs.writeFileSync(filepath, buffer);
-      logger.debug({ filepath }, 'Image saved');
-      return filepath;
-    } catch (err) {
-      logger.warn({ err }, 'Failed to download image');
-      return null;
-    }
-  }
-
   async disconnect(): Promise<void> {
     this.connected = false;
     this.sock?.end(undefined);
@@ -390,6 +347,17 @@ export class WhatsAppChannel implements Channel {
     } catch (err) {
       logger.error({ err }, 'Failed to sync group metadata');
     }
+  }
+
+  private scheduleReconnect(attempt: number): void {
+    const delayMs = Math.min(5000 * Math.pow(2, attempt - 1), 300000);
+    logger.info({ attempt, delayMs }, 'Reconnecting...');
+    setTimeout(() => {
+      this.connectInternal().catch((err) => {
+        logger.error({ err, attempt }, 'Reconnection attempt failed');
+        this.scheduleReconnect(attempt + 1);
+      });
+    }, delayMs);
   }
 
   private async translateJid(jid: string): Promise<string> {

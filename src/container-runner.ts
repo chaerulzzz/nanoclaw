@@ -13,7 +13,6 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
-  IMAGES_DIR,
   TIMEZONE,
 } from './config.js';
 import { readEnvFile } from './env.js';
@@ -42,6 +41,7 @@ export interface ContainerInput {
   assistantName?: string;
   secrets?: Record<string, string>;
   model?: string;
+  imageAttachments?: Array<{ relativePath: string; mediaType: string }>;
 }
 
 export interface ContainerOutput {
@@ -189,15 +189,6 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Images downloaded from WhatsApp (read-only — agent reads them for vision)
-  if (fs.existsSync(IMAGES_DIR)) {
-    mounts.push({
-      hostPath: IMAGES_DIR,
-      containerPath: '/workspace/images',
-      readonly: true,
-    });
-  }
-
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
@@ -216,7 +207,11 @@ function buildVolumeMounts(
  * Secrets are never written to disk or mounted as files.
  */
 function readSecrets(): Record<string, string> {
-  return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'DEEPSEEK_API_KEY']);
+  return readEnvFile([
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'DEEPSEEK_API_KEY',
+  ]);
 }
 
 function buildContainerArgs(
