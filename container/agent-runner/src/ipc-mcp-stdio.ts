@@ -335,7 +335,9 @@ Use available_groups.json to find the JID for a group. The folder name must be c
 
 // ── DeepSeek tools ──────────────────────────────────────────────────────────
 
-const deepseekApiKey = process.env.DEEPSEEK_API_KEY;
+// DeepSeek calls are routed through the host's bearer proxy.
+// DEEPSEEK_BASE_URL points to the proxy; real API key is injected there.
+const deepseekBaseUrl = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
 
 interface DeepSeekApiResponse {
   choices: Array<{
@@ -350,15 +352,10 @@ async function callDeepSeekApi(
   model: string,
   messages: Array<{ role: string; content: string }>,
 ): Promise<{ content: string; reasoning?: string }> {
-  if (!deepseekApiKey) {
-    throw new Error('DEEPSEEK_API_KEY is not configured. Add it to your .env file.');
-  }
-
-  const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+  const response = await fetch(`${deepseekBaseUrl}/v1/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${deepseekApiKey}`,
     },
     body: JSON.stringify({ model, messages }),
   });
