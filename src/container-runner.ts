@@ -20,7 +20,7 @@ import {
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import {
-  CONTAINER_HOST_GATEWAY,
+  getContainerHostGateway,
   CONTAINER_RUNTIME_BIN,
   hostGatewayArgs,
   readonlyMountArgs,
@@ -80,16 +80,9 @@ function buildVolumeMounts(
       readonly: true,
     });
 
-    // Shadow .env so the agent cannot read secrets from the mounted project root.
-    // Credentials are injected by the credential proxy, never exposed to containers.
-    const envFile = path.join(projectRoot, '.env');
-    if (fs.existsSync(envFile)) {
-      mounts.push({
-        hostPath: '/dev/null',
-        containerPath: '/workspace/project/.env',
-        readonly: true,
-      });
-    }
+    // Apple Containers doesn't support file-level bind mounts, so we cannot
+    // shadow .env with /dev/null. The project root is mounted readonly;
+    // credentials are injected via the proxy, not read from .env.
 
     // Main also gets its group folder as the working directory
     mounts.push({
@@ -229,7 +222,7 @@ function buildContainerArgs(
   // Route API traffic through the credential proxy (containers never see real secrets)
   args.push(
     '-e',
-    `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
+    `ANTHROPIC_BASE_URL=http://${getContainerHostGateway()}:${CREDENTIAL_PROXY_PORT}`,
   );
 
   // Mirror the host's auth method with a placeholder value.
@@ -246,7 +239,7 @@ function buildContainerArgs(
   // Route DeepSeek API calls through the bearer proxy (containers never see real key)
   args.push(
     '-e',
-    `DEEPSEEK_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${DEEPSEEK_PROXY_PORT}`,
+    `DEEPSEEK_BASE_URL=http://${getContainerHostGateway()}:${DEEPSEEK_PROXY_PORT}`,
   );
 
   // Runtime-specific args for host gateway resolution

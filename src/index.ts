@@ -27,7 +27,7 @@ import {
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
-  PROXY_BIND_HOST,
+  getProxyBindHost,
 } from './container-runtime.js';
 import {
   getAllChats,
@@ -586,9 +586,11 @@ async function main(): Promise<void> {
   loadState();
 
   // Start credential proxy (containers route API calls through this)
+  // Resolve bind host lazily so bridge100 is available after ensureContainerRuntimeRunning()
+  const proxyHost = getProxyBindHost();
   const proxyServer = await startCredentialProxy(
     CREDENTIAL_PROXY_PORT,
-    PROXY_BIND_HOST,
+    proxyHost,
   );
 
   // Start DeepSeek proxy (containers route DeepSeek calls through this)
@@ -597,7 +599,7 @@ async function main(): Promise<void> {
     'https://api.deepseek.com',
     'DEEPSEEK_API_KEY',
     'deepseek',
-    PROXY_BIND_HOST,
+    proxyHost,
   );
 
   // Graceful shutdown handlers

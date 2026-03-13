@@ -11,20 +11,58 @@ import { logger } from './logger.js';
 /** The container runtime binary name. */
 export const CONTAINER_RUNTIME_BIN = 'container';
 
-/** Hostname containers use to reach the host machine. */
-export const CONTAINER_HOST_GATEWAY = 'host.docker.internal';
+/** Detect bridge100 IPv4 address (Apple Container bridge network). */
+function detectBridge100Ip(): string | undefined {
+  const ifaces = os.networkInterfaces();
+  const bridge = ifaces['bridge100'];
+  if (bridge) {
+    const ipv4 = bridge.find((a) => a.family === 'IPv4');
+    if (ipv4) return ipv4.address;
+  }
+  return undefined;
+}
+
+/**
+ * Hostname containers use to reach the host machine.
+ * Apple Containers: use bridge100 IP directly (no host.docker.internal).
+ * Docker: host.docker.internal.
+ *
+ * bridge100 may not exist yet when the first container is spawned (it comes
+ * up with the first VM). Fall back to 192.168.64.1 which is the stable
+ * gateway IP Apple Containers always assigns to bridge100.
+ */
+export function getContainerHostGateway(): string {
+  if (CONTAINER_RUNTIME_BIN === 'container') {
+    return detectBridge100Ip() || '192.168.64.1';
+  }
+  return 'host.docker.internal';
+}
 
 /**
  * Address the credential proxy binds to.
+ * Apple Containers (macOS): bind to bridge100 IP so containers on 192.168.64.x can reach it.
  * Docker Desktop (macOS): 127.0.0.1 — the VM routes host.docker.internal to loopback.
  * Docker (Linux): bind to the docker0 bridge IP so only containers can reach it,
  *   falling back to 0.0.0.0 if the interface isn't found.
+ *
+ * This is a function (not a constant) so it runs after ensureContainerRuntimeRunning()
+ * has started the runtime and brought up the bridge100 interface.
  */
-export const PROXY_BIND_HOST =
-  process.env.CREDENTIAL_PROXY_HOST || detectProxyBindHost();
+export function getProxyBindHost(): string {
+  return process.env.CREDENTIAL_PROXY_HOST || detectProxyBindHost();
+}
 
 function detectProxyBindHost(): string {
-  if (os.platform() === 'darwin') return '127.0.0.1';
+  if (os.platform() === 'darwin') {
+    if (CONTAINER_RUNTIME_BIN === 'container') {
+      // Apple Containers: bridge100 only exists while a container is running,
+      // so it may not be up when the proxy starts. Bind to 0.0.0.0 to ensure
+      // containers can reach the proxy regardless of bridge100 timing.
+      const bridgeIp = detectBridge100Ip();
+      return bridgeIp || '0.0.0.0';
+    }
+    return '127.0.0.1';
+  }
 
   // WSL uses Docker Desktop (same VM routing as macOS) — loopback is correct.
   // Check /proc filesystem, not env vars — WSL_DISTRO_NAME isn't set under systemd.
