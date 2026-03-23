@@ -221,7 +221,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     deps: {
       sendMessage: (text) => channel.sendMessage(chatJid, text),
       setTyping: (typing) => channel.setTyping?.(chatJid, typing) ?? Promise.resolve(),
-      runAgent: (prompt, onOutput) => runAgent(group, prompt, chatJid, onOutput),
+      runAgent: async (prompt, onOutput) => {
+        const result = await runAgent(group, prompt, chatJid, AGENT_MODEL, [], onOutput);
+        return result.status;
+      },
       closeStdin: () => queue.closeStdin(chatJid),
       advanceCursor: (ts) => { lastAgentTimestamp[chatJid] = ts; saveState(); },
       formatMessages,
